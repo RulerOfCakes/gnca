@@ -2,6 +2,7 @@ use burn::{
     nn::{Linear, Relu},
     prelude::*,
     tensor::{
+        Distribution,
         backend::AutodiffBackend,
         module::{conv2d, max_pool2d},
         ops::ConvOptions,
@@ -33,7 +34,7 @@ pub(crate) struct OriginalModelConfig {
     #[config(default = "1024")]
     pub pool_size: usize,
     #[config(default = "0.5")]
-    pub cell_fire_rate: f64,
+    pub cell_fire_rate: f64, // rate of cells chosen for stochastic update.
 
     #[config(default = "0.1")]
     pub alive_threshold: f64,
@@ -48,6 +49,7 @@ pub(crate) struct OriginalModel<B: Backend> {
     relu: Relu,
 
     alive_threshold: f32,
+    cell_fire_rate: f32,
 }
 
 impl OriginalModelConfig {
@@ -97,13 +99,21 @@ impl<B: Backend> OriginalModel<B> {
 
         Tensor::zeros(states.dims(), &device).mask_where(alive_mask, states)
     }
-    pub fn forward(&self, states: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn forward(&self, states: Tensor<B, 4>, fire_rate: Option<f32>) -> Tensor<B, 4> {
+        let device = states.device();
         let live_states = self.alive_masking(states);
-        let perception = self.perceive(live_states);
+
+        let perception = self.perceive(live_states.clone());
 
         let updated_states = self.update(perception);
 
-        todo!("Perform stochastic cell update");
+        let dist = Distribution::Uniform(0., 1.);
+        let stochastic_mask: Tensor<B, 4> = Tensor::random(updated_states.dims(), dist, &device);
+        // A custom fire rate may be given for training / inference
+        let stochastic_mask =
+            stochastic_mask.greater_elem(fire_rate.unwrap_or(self.cell_fire_rate));
+
+        live_states.mask_where(stochastic_mask, updated_states)
     }
 }
 
