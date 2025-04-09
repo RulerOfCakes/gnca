@@ -1,5 +1,8 @@
 use burn::{
-    nn::{Linear, Relu},
+    nn::{
+        Linear, LinearConfig, Relu,
+        loss::{HuberLossConfig, Reduction},
+    },
     prelude::*,
     tensor::{
         Distribution,
@@ -7,9 +10,13 @@ use burn::{
         module::{conv2d, max_pool2d},
         ops::ConvOptions,
     },
-    train::TrainStep,
+    train::{TrainOutput, TrainStep, ValidStep},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::metrics::ImageGenerationOutput;
+
+use super::data::CABatch;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum ModelType {
@@ -21,7 +28,6 @@ pub(crate) enum ModelType {
 #[derive(Config, Debug)]
 pub(crate) struct OriginalModelConfig {
     pub input_dim: usize,
-    pub output_dim: usize,
 
     #[config(default = "16")]
     pub state_channels: usize,
@@ -29,8 +35,6 @@ pub(crate) struct OriginalModelConfig {
     pub target_padding: usize,
     #[config(default = "40")]
     pub target_size: usize,
-    #[config(default = "8")]
-    pub batch_size: usize,
     #[config(default = "1024")]
     pub pool_size: usize,
     #[config(default = "0.5")]
@@ -45,7 +49,7 @@ pub(crate) struct OriginalModelConfig {
 #[derive(Module, Debug)]
 pub(crate) struct OriginalModel<B: Backend> {
     dense128: Linear<B>,
-    dense16: Linear<B>,
+    dense_out: Linear<B>,
     relu: Relu,
 
     alive_threshold: f32,
@@ -64,7 +68,15 @@ impl OriginalModelConfig {
             ModelType::Persistent => 0,
             ModelType::Regenerating => 3,
         }; // number of patterns to damage in a batch
-        todo!()
+
+        OriginalModel {
+            dense128: LinearConfig::new(self.input_dim, 128).init(device),
+            dense_out: LinearConfig::new(128, self.state_channels).init(device),
+            relu: Relu::new(),
+
+            alive_threshold: self.alive_threshold as f32,
+            cell_fire_rate: self.cell_fire_rate as f32,
+        }
     }
 }
 
@@ -86,7 +98,7 @@ impl<B: Backend> OriginalModel<B> {
     fn update(&self, perception: Tensor<B, 4>) -> Tensor<B, 4> {
         let x = self.dense128.forward(perception);
         let x = self.relu.forward(x);
-        self.dense16.forward(x)
+        self.dense_out.forward(x)
     }
     fn alive_masking(&self, states: Tensor<B, 4>) -> Tensor<B, 4> {
         let device = states.device();
@@ -115,7 +127,31 @@ impl<B: Backend> OriginalModel<B> {
 
         live_states.mask_where(stochastic_mask, updated_states)
     }
+    pub fn forward_regression(
+        &self,
+        states: Tensor<B, 4>,
+        targets: Tensor<B, 4>,
+    ) -> ImageGenerationOutput<B> {
+        let output = self.forward(states, None);
+        let reduction = Reduction::Auto;
+        let loss =
+            HuberLossConfig::new(0.1)
+                .init()
+                .forward(output.clone(), targets.clone(), reduction);
+
+        ImageGenerationOutput::new(loss, output, targets)
+    }
 }
 
-// impl <B:AutodiffBackend> TrainStep<> for OriginalModel<B> {
-// }
+impl<B: AutodiffBackend> TrainStep<CABatch<B>, ImageGenerationOutput<B>> for OriginalModel<B> {
+    fn step(&self, batch: CABatch<B>) -> TrainOutput<ImageGenerationOutput<B>> {
+        let item = self.forward_regression(batch.initial_states, batch.expected_results);
+        TrainOutput::new(self, item.loss.backward(), item)
+    }
+}
+
+impl<B: Backend> ValidStep<CABatch<B>, ImageGenerationOutput<B>> for OriginalModel<B> {
+    fn step(&self, batch: CABatch<B>) -> ImageGenerationOutput<B> {
+        self.forward_regression(batch.initial_states, batch.expected_results)
+    }
+}

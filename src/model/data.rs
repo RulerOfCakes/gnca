@@ -1,8 +1,47 @@
 use burn::{
-    data::dataloader::batcher::Batcher,
+    data::{dataloader::batcher::Batcher, dataset::Dataset},
     prelude::Backend,
     tensor::{Tensor, TensorData},
 };
+
+#[derive(Clone, Debug)]
+pub struct CAData {
+    pub state: Vec<Vec<Vec<f32>>>,    // height, width, visible channels
+    pub expected: Vec<Vec<Vec<f32>>>, // height, width, visible channels
+}
+
+#[derive(Clone, Debug)]
+pub struct CADataset {
+    pub data: Vec<CAData>,
+}
+
+impl CADataset {
+    pub fn new(data: Vec<CAData>) -> Self {
+        CADataset { data }
+    }
+    pub fn split(self, ratio: f32) -> (Self, Self) {
+        let split_index = (self.data.len() as f32 * ratio).round() as usize;
+        let (train_data, valid_data) = self.data.split_at(split_index);
+        (
+            CADataset::new(train_data.to_vec()),
+            CADataset::new(valid_data.to_vec()),
+        )
+    }
+}
+
+impl Dataset<CAData> for CADataset {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn get(&self, index: usize) -> Option<CAData> {
+        if index < self.data.len() {
+            Some(self.data[index].clone())
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct CABatcher<B: Backend> {
@@ -20,12 +59,6 @@ impl<B: Backend> CABatcher<B> {
 pub struct CABatch<B: Backend> {
     pub initial_states: Tensor<B, 4>,
     pub expected_results: Tensor<B, 4>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CAData {
-    pub state: Vec<Vec<Vec<f32>>>,    // height, width, visible channels
-    pub expected: Vec<Vec<Vec<f32>>>, // height, width, visible channels
 }
 
 impl<B: Backend> Batcher<CAData, CABatch<B>> for CABatcher<B> {
@@ -83,15 +116,12 @@ impl<B: Backend> Batcher<CAData, CABatch<B>> for CABatcher<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::{
-        backend::{Wgpu, wgpu::WgpuDevice},
-        tensor::Shape,
-    };
-    type TestBackend = Wgpu<f32, i32>;
+    use crate::test_utils::{TestBackend, TestDevice};
+    use burn::tensor::Shape;
 
     #[test]
     fn test_batcher() {
-        let device = WgpuDevice::default();
+        let device = TestDevice::default();
         let batcher: CABatcher<TestBackend> = CABatcher::new(device);
         let data = vec![
             CAData {
