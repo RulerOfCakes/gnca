@@ -2072,6 +2072,7 @@ dependencies = [
  "burn",
  "burn-ndarray",
  "image",
+ "rand 0.9.0",
  "serde",
  "tracing",
  "tracing-subscriber",

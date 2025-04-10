@@ -1,4 +1,14 @@
-use burn::{config::Config, data::dataloader::DataLoaderBuilder, tensor::backend::AutodiffBackend};
+use burn::{
+    config::Config,
+    data::dataloader::DataLoaderBuilder,
+    module::AutodiffModule,
+    optim::{AdamConfig, GradientsParams, Optimizer},
+    tensor::{ElementConversion, backend::AutodiffBackend},
+};
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use tracing::{Level, info, span};
+
+use crate::metrics::ImageGenerationOutput;
 
 use super::{
     data::{CABatcher, CADataset},
@@ -7,12 +17,18 @@ use super::{
 
 #[derive(Config)]
 pub struct TrainingConfig {
-    pub model: OriginalModelConfig,
     #[config(default = 4)]
     pub num_workers: usize,
     #[config(default = 8)]
     pub batch_size: usize,
+
+    pub num_epochs: usize,
+    #[config(default = 2e-3)]
+    pub lr: f32,
     pub seed: u64,
+
+    pub model: OriginalModelConfig,
+    pub optimizer: AdamConfig,
 }
 
 fn create_artifact_dir(artifact_dir: &str) {
@@ -27,12 +43,19 @@ pub fn train<B: AutodiffBackend>(
     dataset: CADataset,
     device: B::Device,
 ) {
+    let span = span!(Level::TRACE, "train", artifact_dir);
+    let _enter = span.enter();
+
     create_artifact_dir(artifact_dir);
     config
         .save(format!("{}/config.json", artifact_dir))
         .expect("Config should be saved successfully");
 
     B::seed(config.seed);
+    let mut rng = StdRng::seed_from_u64(config.seed);
+
+    let mut model = config.model.init::<B>(&device);
+    let mut optim = config.optimizer.init();
 
     let batcher_train = CABatcher::<B>::new(device.clone());
     // validation phase does not require autodiff -> use inner backend
@@ -52,6 +75,50 @@ pub fn train<B: AutodiffBackend>(
         .num_workers(config.num_workers)
         .build(test_data);
 
-    // Custom training loop for BPTT
+    info!(
+        "Training for {} epochs with seed: {}",
+        config.num_epochs, config.seed
+    );
+    for _epoch in 1..config.num_epochs + 1 {
+        for (_iteration, batch) in dataloader_train.iter().enumerate() {
+            let steps = rng.random_range(64..=96);
+            let output =
+                model.forward_regression(batch.initial_states, batch.expected_results, steps);
+            let ImageGenerationOutput {
+                loss,
+                output,
+                targets,
+            } = output;
+            let grads = loss.backward();
+            let grads = GradientsParams::from_grads(grads, &model);
+            model = optim.step(config.lr.into(), model, grads);
+            info!(
+                "Epoch: {}, Iteration: {}, Loss: {}",
+                _epoch,
+                _iteration,
+                loss.mean().into_scalar().elem::<f32>()
+            );
+        }
+
+        let model_valid = model.valid();
+
+        for (_iteration, batch) in dataloader_test.iter().enumerate() {
+            let steps = rng.random_range(64..=96);
+            let output =
+                model_valid.forward_regression(batch.initial_states, batch.expected_results, steps);
+            let ImageGenerationOutput {
+                loss,
+                output,
+                targets,
+            } = output;
+
+            info!(
+                "Validation Epoch: {}, Iteration: {}, Loss: {}",
+                _epoch,
+                _iteration,
+                loss.mean().into_scalar().elem::<f32>()
+            )
+        }
+    }
     todo!()
 }

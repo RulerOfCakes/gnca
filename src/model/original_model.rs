@@ -6,17 +6,13 @@ use burn::{
     prelude::*,
     tensor::{
         Distribution,
-        backend::AutodiffBackend,
         module::{conv2d, max_pool2d},
         ops::ConvOptions,
     },
-    train::{TrainOutput, TrainStep, ValidStep},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::ImageGenerationOutput;
-
-use super::data::CABatch;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum ModelType {
@@ -52,6 +48,7 @@ pub(crate) struct OriginalModel<B: Backend> {
     dense_out: Linear<B>,
     relu: Relu,
 
+    state_channels: usize,
     alive_threshold: f32,
     cell_fire_rate: f32,
 }
@@ -74,6 +71,7 @@ impl OriginalModelConfig {
             dense_out: LinearConfig::new(128, self.state_channels).init(device),
             relu: Relu::new(),
 
+            state_channels: self.state_channels,
             alive_threshold: self.alive_threshold as f32,
             cell_fire_rate: self.cell_fire_rate as f32,
         }
@@ -131,8 +129,20 @@ impl<B: Backend> OriginalModel<B> {
         &self,
         states: Tensor<B, 4>,
         targets: Tensor<B, 4>,
+        steps: usize,
     ) -> ImageGenerationOutput<B> {
-        let output = self.forward(states, None);
+        // first, expand the channels of the input states
+        let mut shape = states.dims();
+        let original_channels = shape[1];
+        shape[1] = self.state_channels;
+        let mut states = states.expand(shape);
+
+        for _ in 0..steps {
+            states = self.forward(states, None);
+        }
+
+        // reduce the channels again to match the target
+        let output = states.slice([0..shape[0], 0..original_channels, 0..shape[2], 0..shape[3]]);
         let reduction = Reduction::Auto;
         let loss =
             HuberLossConfig::new(0.1)
@@ -140,18 +150,5 @@ impl<B: Backend> OriginalModel<B> {
                 .forward(output.clone(), targets.clone(), reduction);
 
         ImageGenerationOutput::new(loss, output, targets)
-    }
-}
-
-impl<B: AutodiffBackend> TrainStep<CABatch<B>, ImageGenerationOutput<B>> for OriginalModel<B> {
-    fn step(&self, batch: CABatch<B>) -> TrainOutput<ImageGenerationOutput<B>> {
-        let item = self.forward_regression(batch.initial_states, batch.expected_results);
-        TrainOutput::new(self, item.loss.backward(), item)
-    }
-}
-
-impl<B: Backend> ValidStep<CABatch<B>, ImageGenerationOutput<B>> for OriginalModel<B> {
-    fn step(&self, batch: CABatch<B>) -> ImageGenerationOutput<B> {
-        self.forward_regression(batch.initial_states, batch.expected_results)
     }
 }
