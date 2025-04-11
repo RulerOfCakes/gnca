@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use image::ImageReader;
+use image::{ColorType, ImageEncoder, ImageReader, codecs::png::PngEncoder};
 use tracing::info;
 
 const IMAGE_SIZE_LIMIT: u64 = 1024 * 1024 * 10; // 10 MB
@@ -47,6 +47,16 @@ pub fn load_emoji(emoji: &str, width: u32, height: u32) -> Result<Vec<u8>, anyho
         emoji_code
     );
     load_image_from_url(&url, width, height)
+}
+
+// assuming RGBA per pixel
+pub fn bytes_to_png(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, anyhow::Error> {
+    let mut png_data = Vec::new();
+    let encoder = PngEncoder::new(Cursor::new(&mut png_data));
+    encoder
+        .write_image(bytes, width, height, ColorType::Rgba8.into())
+        .map_err(|e| anyhow::anyhow!("Failed to encode PNG: {}", e))?;
+    Ok(png_data)
 }
 
 #[cfg(test)]

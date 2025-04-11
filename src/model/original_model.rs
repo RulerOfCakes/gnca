@@ -48,6 +48,7 @@ pub(crate) struct OriginalModel<B: Backend> {
     dense_out: Linear<B>,
     relu: Relu,
 
+    target_padding: usize,
     state_channels: usize,
     alive_threshold: f32,
     cell_fire_rate: f32,
@@ -71,6 +72,7 @@ impl OriginalModelConfig {
             dense_out: LinearConfig::new(128, self.state_channels).init(device),
             relu: Relu::new(),
 
+            target_padding: self.target_padding,
             state_channels: self.state_channels,
             alive_threshold: self.alive_threshold as f32,
             cell_fire_rate: self.cell_fire_rate as f32,
@@ -109,7 +111,7 @@ impl<B: Backend> OriginalModel<B> {
 
         Tensor::zeros(states.dims(), &device).mask_where(alive_mask, states)
     }
-    pub fn forward(&self, states: Tensor<B, 4>, fire_rate: Option<f32>) -> Tensor<B, 4> {
+    fn forward(&self, states: Tensor<B, 4>, fire_rate: Option<f32>) -> Tensor<B, 4> {
         let device = states.device();
         let live_states = self.alive_masking(states);
 
@@ -131,7 +133,27 @@ impl<B: Backend> OriginalModel<B> {
         targets: Tensor<B, 4>,
         steps: usize,
     ) -> ImageGenerationOutput<B> {
-        // first, expand the channels of the input states
+        // first, pad the states / targets according to model parameters
+        let states = states.pad(
+            (
+                self.target_padding,
+                self.target_padding,
+                self.target_padding,
+                self.target_padding,
+            ),
+            0,
+        );
+        let targets = targets.pad(
+            (
+                self.target_padding,
+                self.target_padding,
+                self.target_padding,
+                self.target_padding,
+            ),
+            0,
+        );
+
+        // expand the channels of the input states
         let mut shape = states.dims();
         let original_channels = shape[1];
         shape[1] = self.state_channels;

@@ -5,9 +5,31 @@ use burn::{
 };
 
 #[derive(Clone, Debug)]
+pub struct CAState(Vec<Vec<Vec<f32>>>); // height, width, visible channels
+
+#[derive(Clone, Debug)]
 pub struct CAData {
-    pub state: Vec<Vec<Vec<f32>>>,    // height, width, visible channels
-    pub expected: Vec<Vec<Vec<f32>>>, // height, width, visible channels
+    pub state: CAState,
+    pub expected: CAState,
+}
+
+impl<B: Backend> From<Tensor<B, 3>> for CAState {
+    fn from(value: Tensor<B, 3>) -> Self {
+        let [height, width, channels] = value.dims();
+
+        let flat_data = value.to_data();
+        let mut iter: Box<dyn Iterator<Item = f32>> = flat_data.iter();
+
+        let mut base_vec = vec![vec![vec![0.0; channels]; width]; height];
+        for i in 0..height {
+            for j in 0..width {
+                for k in 0..channels {
+                    base_vec[i][j][k] = iter.next().unwrap();
+                }
+            }
+        }
+        CAState(base_vec)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -67,10 +89,11 @@ impl<B: Backend> Batcher<CAData, CABatch<B>> for CABatcher<B> {
         let initial_states = data
             .iter()
             .map(|cadata| {
-                let (height, width) = (cadata.state.len(), cadata.state[0].len());
-                let channels = cadata.state[0][0].len();
+                let (height, width) = (cadata.state.0.len(), cadata.state.0[0].len());
+                let channels = cadata.state.0[0][0].len();
                 let flattened_state = cadata
                     .state
+                    .0
                     .clone()
                     .into_iter()
                     .flatten()
@@ -84,10 +107,11 @@ impl<B: Backend> Batcher<CAData, CABatch<B>> for CABatcher<B> {
         let expected_results = data
             .iter()
             .map(|cadata| {
-                let (height, width) = (cadata.expected.len(), cadata.expected[0].len());
-                let channels = cadata.expected[0][0].len();
+                let (height, width) = (cadata.expected.0.len(), cadata.expected.0[0].len());
+                let channels = cadata.expected.0[0][0].len();
                 let flattened_expected = cadata
                     .expected
+                    .0
                     .clone()
                     .into_iter()
                     .flatten()
@@ -120,22 +144,40 @@ mod tests {
     use burn::tensor::Shape;
 
     #[test]
+    fn test_castate() {
+        let device = TestDevice::default();
+        let data = CAState(vec![vec![vec![1., 3., 2., 4.]; 5]; 3]);
+        let tensor_data = TensorData::new(
+            data.0
+                .clone()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect::<Vec<_>>(),
+            [3, 5, 4],
+        );
+        let tensor: Tensor<TestBackend, 3> = Tensor::from_data(tensor_data, &device);
+        let casted: CAState = tensor.into();
+        assert_eq!(data.0, casted.0);
+    }
+
+    #[test]
     fn test_batcher() {
         let device = TestDevice::default();
         let batcher: CABatcher<TestBackend> = CABatcher::new(device);
         let data = vec![
             CAData {
-                state: vec![vec![vec![0.0; 4]; 5]; 3],
-                expected: vec![vec![vec![1.0; 4]; 5]; 3],
+                state: CAState(vec![vec![vec![0.0; 4]; 5]; 3]),
+                expected: CAState(vec![vec![vec![1.0; 4]; 5]; 3]),
             },
             CAData {
-                state: vec![vec![vec![2.0; 4]; 5]; 3],
-                expected: vec![vec![vec![3.0; 4]; 5]; 3],
+                state: CAState(vec![vec![vec![2.0; 4]; 5]; 3]),
+                expected: CAState(vec![vec![vec![3.0; 4]; 5]; 3]),
             },
         ]; // 2D images with RGBA channels
         let batch = batcher.batch(data);
 
-        // Output dimension should be in `NHWC` format
+        // Output dimension should be in `NCHW` format
         assert_eq!(batch.initial_states.shape(), Shape::new([2, 4, 3, 5]));
         assert_eq!(batch.expected_results.shape(), Shape::new([2, 4, 3, 5]));
 
@@ -155,8 +197,8 @@ mod tests {
         }
 
         let data = vec![CAData {
-            state: vec![vec![vec![0.0; 4]; 5]; 3],
-            expected: vec![vec![vec![0., 1., 2., 3.]; 5]; 3],
+            state: CAState(vec![vec![vec![0.0; 4]; 5]; 3]),
+            expected: CAState(vec![vec![vec![0., 1., 2., 3.]; 5]; 3]),
         }];
         let batch = batcher.batch(data);
 
