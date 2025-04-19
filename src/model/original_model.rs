@@ -1,6 +1,7 @@
 use burn::{
     nn::{
-        Linear, LinearConfig, Relu,
+        Initializer, Relu,
+        conv::{Conv2d, Conv2dConfig},
         loss::{HuberLossConfig, Reduction},
     },
     prelude::*,
@@ -14,17 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::metrics::ImageGenerationOutput;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub(crate) enum ModelType {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum ModelType {
     Growing,
     Persistent,
     Regenerating,
 }
 
 #[derive(Config, Debug)]
-pub(crate) struct OriginalModelConfig {
-    pub input_dim: usize,
-
+pub struct OriginalModelConfig {
     #[config(default = "16")]
     pub state_channels: usize,
     #[config(default = "16")]
@@ -43,9 +42,9 @@ pub(crate) struct OriginalModelConfig {
 }
 
 #[derive(Module, Debug)]
-pub(crate) struct OriginalModel<B: Backend> {
-    dense128: Linear<B>,
-    dense_out: Linear<B>,
+pub struct OriginalModel<B: Backend> {
+    perception_conv: Conv2d<B>,
+    hidden_conv: Conv2d<B>,
     relu: Relu,
 
     target_padding: usize,
@@ -68,8 +67,10 @@ impl OriginalModelConfig {
         }; // number of patterns to damage in a batch
 
         OriginalModel {
-            dense128: LinearConfig::new(self.input_dim, 128).init(device),
-            dense_out: LinearConfig::new(128, self.state_channels).init(device),
+            perception_conv: Conv2dConfig::new([self.state_channels * 3, 128], [1, 1]).init(device),
+            hidden_conv: Conv2dConfig::new([128, self.state_channels], [1, 1])
+                .with_initializer(Initializer::Zeros) // the update rule does nothing initially
+                .init(device),
             relu: Relu::new(),
 
             target_padding: self.target_padding,
@@ -96,9 +97,9 @@ impl<B: Backend> OriginalModel<B> {
         Tensor::cat(vec![states, grad_x, grad_y], 1)
     }
     fn update(&self, perception: Tensor<B, 4>) -> Tensor<B, 4> {
-        let x = self.dense128.forward(perception);
+        let x = self.perception_conv.forward(perception);
         let x = self.relu.forward(x);
-        self.dense_out.forward(x)
+        self.hidden_conv.forward(x)
     }
     fn alive_masking(&self, states: Tensor<B, 4>) -> Tensor<B, 4> {
         let device = states.device();
