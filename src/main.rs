@@ -1,12 +1,19 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::thread;
 
+use burn::config::Config;
 use burn::optim::AdamConfig;
 use eframe::egui::{self};
 use eframe::{NativeOptions, egui::ViewportBuilder, run_native};
-use gnca::imageutils::load_emoji;
+use gnca::imageutils::{RgbaImageBuffer, load_emoji};
+use gnca::model::data::CADataset;
 use gnca::model::original_model::{ModelType, OriginalModelConfig};
 use gnca::model::train::TrainingConfig;
 use gnca::ui::{add_draggable_option, create_image_from_rgba};
+
+const TRAINING_CFG_PATH: &str = "training_cfg.json";
+
 fn main() -> eframe::Result {
     unsafe {
         std::env::set_var("WAYLAND_DISPLAY", ""); // Force X11 on Linux
@@ -16,6 +23,7 @@ fn main() -> eframe::Result {
         viewport: ViewportBuilder::default().with_inner_size([1200., 800.]),
         ..Default::default()
     };
+
     run_native(
         "Growing Neural Cellular Automata",
         options,
@@ -46,16 +54,21 @@ struct MyApp {
     image_handles: HashMap<String, eframe::egui::TextureHandle>,
     state: AppState,
     training_cfg: TrainingConfig,
+    target_image: Arc<RgbaImageBuffer>, // TODO: let this be modifiable from ui
 }
 
 impl MyApp {
     fn new() -> Self {
-        let model_cfg = OriginalModelConfig::new(ModelType::Growing);
-        let optimizer = AdamConfig::new();
+        let training_cfg = TrainingConfig::load(TRAINING_CFG_PATH).unwrap_or(TrainingConfig::new(
+            OriginalModelConfig::new(ModelType::Growing),
+            AdamConfig::new(),
+        ));
+
         Self {
             image_handles: HashMap::new(),
             state: AppState::Idle,
-            training_cfg: TrainingConfig::new(model_cfg, optimizer),
+            training_cfg,
+            target_image: Arc::new(load_emoji("😊", 40, 40).unwrap()),
         }
     }
     fn insert_or_replace_image(
@@ -66,6 +79,25 @@ impl MyApp {
     ) {
         let handle = ctx.load_texture(name, image, eframe::egui::TextureOptions::default());
         self.image_handles.insert(name.to_string(), handle);
+    }
+
+    fn train_model(&mut self) {
+        self.state = AppState::Training;
+        let image = self.target_image.clone();
+        thread::spawn(move || {
+            let dataset =
+                CADataset::new_from_image(&image, gnca::model::data::InitMethod::CenterPixel, 144);
+        });
+    }
+
+    fn infer_model(&mut self) {
+        self.state = AppState::Inference;
+        thread::spawn(move || todo!());
+    }
+
+    fn stop_model(&mut self) {
+        self.state = AppState::Idle;
+        todo!()
     }
 }
 
@@ -99,7 +131,7 @@ impl eframe::App for MyApp {
                         ui,
                         "Pool Size",
                         Some("Size of the pool for the cellular automata."),
-                        &mut self.training_cfg.model.pool_size,
+                        &mut self.training_cfg.pool_size,
                         None,
                     );
                     add_draggable_option(
@@ -179,23 +211,23 @@ impl eframe::App for MyApp {
                         AppState::Idle => {
                             ui.horizontal(|ui| {
                                 if ui.button("Start Training").clicked() {
-                                    self.state = AppState::Training;
+                                    self.train_model();
                                 }
                                 if ui.button("Start Inference").clicked() {
-                                    self.state = AppState::Inference;
+                                    self.infer_model();
                                 }
                             });
                         }
                         AppState::Training => {
                             ui.label("Training in progress...");
                             if ui.button("Stop Training").clicked() {
-                                self.state = AppState::Idle;
+                                self.stop_model();
                             }
                         }
                         AppState::Inference => {
                             ui.label("Inference in progress...");
                             if ui.button("Stop Inference").clicked() {
-                                self.state = AppState::Idle;
+                                self.stop_model();
                             }
                         }
                     }

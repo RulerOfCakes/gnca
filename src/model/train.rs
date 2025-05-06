@@ -10,7 +10,7 @@ use burn::{
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use tracing::{Level, info, span, warn};
 
-use crate::metrics::ImageGenerationOutput;
+use crate::{imageutils::RgbaImageBuffer, metrics::ImageGenerationOutput, model::data::CAState};
 
 use super::{
     data::{CABatcher, CADataset},
@@ -23,6 +23,8 @@ pub struct TrainingConfig {
     pub num_workers: usize,
     #[config(default = 8)]
     pub batch_size: usize,
+    #[config(default = 1024)]
+    pub pool_size: usize,
 
     #[config(default = 8000)]
     pub num_epochs: usize,
@@ -46,99 +48,109 @@ pub type TrainingFeedback<B> = (
     Tensor<<B as AutodiffBackend>::InnerBackend, 4>,
 );
 
-pub fn train<B: AutodiffBackend>(
-    artifact_dir: &str,
-    config: TrainingConfig,
-    dataset: CADataset,
-    device: B::Device,
-    feedback_sender: Option<Sender<TrainingFeedback<B>>>,
-) {
-    let span = span!(Level::TRACE, "train", artifact_dir);
-    let _enter = span.enter();
+impl TrainingConfig {
+    pub fn train<B: AutodiffBackend>(
+        &self,
+        artifact_dir: &str,
+        image: &RgbaImageBuffer,
+        device: B::Device,
+        feedback_sender: Option<Sender<TrainingFeedback<B>>>,
+    ) {
+        let span = span!(Level::TRACE, "train", artifact_dir);
+        let _enter = span.enter();
 
-    create_artifact_dir(artifact_dir);
-    config
-        .save(format!("{}/config.json", artifact_dir))
-        .expect("Config should be saved successfully");
+        let dataset = CADataset::new_from_image(
+            image,
+            crate::model::data::InitMethod::CenterPixel,
+            self.pool_size,
+        );
 
-    B::seed(config.seed);
-    let mut rng = StdRng::seed_from_u64(config.seed);
+        create_artifact_dir(artifact_dir);
+        self.save(format!("{}/self.json", artifact_dir))
+            .expect("self should be saved successfully");
 
-    let mut model = config.model.init::<B>(&device);
-    let mut optim = config.optimizer.init();
+        B::seed(self.seed);
+        let mut rng = StdRng::seed_from_u64(self.seed);
 
-    let batcher_train = CABatcher::<B>::new(device.clone());
-    // validation phase does not require autodiff -> use inner backend
-    let batcher_valid = CABatcher::<B::InnerBackend>::new(device.clone());
+        let mut model = self.model.init::<B>(&device);
+        let mut optim = self.optimizer.init();
 
-    // split into train and validation sets
-    let (train_data, test_data) = dataset.split(0.8);
+        let batcher_train = CABatcher::<B>::new(device.clone());
+        // validation phase does not require autodiff -> use inner backend
+        let batcher_valid = CABatcher::<B::InnerBackend>::new(device.clone());
 
-    let dataloader_train = DataLoaderBuilder::new(batcher_train)
-        .batch_size(config.batch_size)
-        .shuffle(config.seed)
-        .num_workers(config.num_workers)
-        .build(train_data);
-    let dataloader_test = DataLoaderBuilder::new(batcher_valid)
-        .batch_size(config.batch_size)
-        .shuffle(config.seed)
-        .num_workers(config.num_workers)
-        .build(test_data);
+        // split into train and validation sets
+        let (train_data, test_data) = dataset.split(0.8);
 
-    info!(
-        "Training for {} epochs with seed: {}",
-        config.num_epochs, config.seed
-    );
-    for _epoch in 1..config.num_epochs + 1 {
-        for (_iteration, batch) in dataloader_train.iter().enumerate() {
-            let steps = rng.random_range(64..=96);
-            let output =
-                model.forward_regression(batch.initial_states, batch.expected_results, steps);
-            let ImageGenerationOutput {
-                loss,
-                output,
-                targets,
-            } = output;
-            let grads = loss.backward();
-            let grads = GradientsParams::from_grads(grads, &model);
-            model = optim.step(config.lr.into(), model, grads);
-            info!(
-                "Epoch: {}, Iteration: {}, Loss: {}",
-                _epoch,
-                _iteration,
-                loss.mean().into_scalar().elem::<f32>()
-            );
-            if let Some(sender) = feedback_sender.as_ref() {
-                if let Err(e) = sender.send((output.inner(), targets.inner())) {
-                    warn!("Error sending feedback: {}", e);
+        let dataloader_train = DataLoaderBuilder::new(batcher_train)
+            .batch_size(self.batch_size)
+            .shuffle(self.seed)
+            .num_workers(self.num_workers)
+            .build(train_data);
+        let dataloader_test = DataLoaderBuilder::new(batcher_valid)
+            .batch_size(self.batch_size)
+            .shuffle(self.seed)
+            .num_workers(self.num_workers)
+            .build(test_data);
+
+        info!(
+            "Training for {} epochs with seed: {}",
+            self.num_epochs, self.seed
+        );
+        for _epoch in 1..self.num_epochs + 1 {
+            for (_iteration, batch) in dataloader_train.iter().enumerate() {
+                let steps = rng.random_range(64..=96);
+                let output =
+                    model.forward_regression(batch.initial_states, batch.expected_results, steps);
+                let ImageGenerationOutput {
+                    loss,
+                    output,
+                    targets,
+                } = output;
+                let grads = loss.backward();
+                let grads = GradientsParams::from_grads(grads, &model);
+                model = optim.step(self.lr.into(), model, grads);
+                info!(
+                    "Epoch: {}, Iteration: {}, Loss: {}",
+                    _epoch,
+                    _iteration,
+                    loss.mean().into_scalar().elem::<f32>()
+                );
+                if let Some(sender) = feedback_sender.as_ref() {
+                    if let Err(e) = sender.send((output.inner(), targets.inner())) {
+                        warn!("Error sending feedback: {}", e);
+                    }
+                }
+            }
+
+            let model_valid = model.valid();
+
+            for (_iteration, batch) in dataloader_test.iter().enumerate() {
+                let steps = rng.random_range(64..=96);
+                let output = model_valid.forward_regression(
+                    batch.initial_states,
+                    batch.expected_results,
+                    steps,
+                );
+                let ImageGenerationOutput {
+                    loss,
+                    output,
+                    targets,
+                } = output;
+
+                info!(
+                    "Validation Epoch: {}, Iteration: {}, Loss: {}",
+                    _epoch,
+                    _iteration,
+                    loss.mean().into_scalar().elem::<f32>()
+                );
+                if let Some(sender) = feedback_sender.as_ref() {
+                    if let Err(e) = sender.send((output, targets)) {
+                        warn!("Error sending feedback: {}", e);
+                    }
                 }
             }
         }
-
-        let model_valid = model.valid();
-
-        for (_iteration, batch) in dataloader_test.iter().enumerate() {
-            let steps = rng.random_range(64..=96);
-            let output =
-                model_valid.forward_regression(batch.initial_states, batch.expected_results, steps);
-            let ImageGenerationOutput {
-                loss,
-                output,
-                targets,
-            } = output;
-
-            info!(
-                "Validation Epoch: {}, Iteration: {}, Loss: {}",
-                _epoch,
-                _iteration,
-                loss.mean().into_scalar().elem::<f32>()
-            );
-            if let Some(sender) = feedback_sender.as_ref() {
-                if let Err(e) = sender.send((output, targets)) {
-                    warn!("Error sending feedback: {}", e);
-                }
-            }
-        }
+        todo!()
     }
-    todo!()
 }

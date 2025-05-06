@@ -5,11 +5,13 @@ use tracing::info;
 
 const IMAGE_SIZE_LIMIT: u64 = 1024 * 1024 * 10; // 10 MB
 
+pub type RgbaImageBuffer = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
+
 pub fn load_image_from_url(
     image_url: &str,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>, anyhow::Error> {
+) -> Result<RgbaImageBuffer, anyhow::Error> {
     info!("Loading image from URL: {}", image_url);
     let mut response = ureq::get(image_url)
         .call()
@@ -25,9 +27,9 @@ pub fn load_image_from_url(
     let image = reader.decode()?;
 
     let image = image.thumbnail(width, height);
-    let rgb_image = image.to_rgba8();
+    let rgb_image: RgbaImageBuffer = image.to_rgba8();
 
-    Ok(rgb_image.to_vec())
+    Ok(rgb_image)
 }
 
 fn expand_emoji(emoji: &str) -> String {
@@ -40,7 +42,7 @@ fn expand_emoji(emoji: &str) -> String {
     emoji_code
 }
 
-pub fn load_emoji(emoji: &str, width: u32, height: u32) -> Result<Vec<u8>, anyhow::Error> {
+pub fn load_emoji(emoji: &str, width: u32, height: u32) -> Result<RgbaImageBuffer, anyhow::Error> {
     let emoji_code = expand_emoji(emoji);
     let url = format!(
         "https://github.com/googlefonts/noto-emoji/blob/main/png/128/emoji_u{}.png?raw=true",

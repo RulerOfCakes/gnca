@@ -30,8 +30,6 @@ pub struct OriginalModelConfig {
     pub target_padding: usize,
     #[config(default = "40")]
     pub target_size: usize,
-    #[config(default = "1024")]
-    pub pool_size: usize,
     #[config(default = "0.5")]
     pub cell_fire_rate: f64, // rate of cells chosen for stochastic update.
 

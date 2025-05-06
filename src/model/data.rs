@@ -4,13 +4,65 @@ use burn::{
     tensor::{Tensor, TensorData},
 };
 
+use crate::imageutils::RgbaImageBuffer;
+
 #[derive(Clone, Debug)]
-pub struct CAState(Vec<Vec<Vec<f32>>>); // height, width, visible channels
+pub struct CAState(pub Vec<Vec<Vec<f32>>>); // height, width, visible channels
+
+impl CAState {
+    pub fn new_single_pixel(height: usize, width: usize, channels: usize) -> Self {
+        let mut base_vec = vec![vec![vec![0.0; channels]; width]; height];
+        base_vec[height / 2][width / 2] = vec![1.0; channels];
+        // set RGB channels to 0
+        base_vec[height / 2][width / 2][0] = 0.0;
+        base_vec[height / 2][width / 2][1] = 0.0;
+        base_vec[height / 2][width / 2][2] = 0.0;
+        CAState(base_vec)
+    }
+    pub fn new_from_image(buffer: &RgbaImageBuffer) -> Self {
+        let (height, width) = (buffer.height() as usize, buffer.width() as usize);
+        let channels = 4; // RGBA
+        let mut base_vec = vec![vec![vec![0.0; channels]; width]; height];
+        for i in 0..height {
+            for j in 0..width {
+                let pixel = buffer.get_pixel(j as u32, i as u32);
+                base_vec[i][j] = vec![
+                    pixel[0] as f32 / 255.0,
+                    pixel[1] as f32 / 255.0,
+                    pixel[2] as f32 / 255.0,
+                    pixel[3] as f32 / 255.0,
+                ];
+            }
+        }
+        CAState(base_vec)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CAData {
     pub state: CAState,
     pub expected: CAState,
+}
+
+pub enum InitMethod {
+    CenterPixel,
+    Gaussian,
+}
+
+impl CAData {
+    pub fn new(expected: CAState, init_method: &InitMethod) -> Self {
+        match init_method {
+            InitMethod::CenterPixel => CAData {
+                state: CAState::new_single_pixel(
+                    expected.0.len(),
+                    expected.0[0].len(),
+                    expected.0[0][0].len(),
+                ),
+                expected,
+            },
+            InitMethod::Gaussian => unimplemented!(),
+        }
+    }
 }
 
 impl<B: Backend> From<Tensor<B, 3>> for CAState {
@@ -39,6 +91,14 @@ pub struct CADataset {
 
 impl CADataset {
     pub fn new(data: Vec<CAData>) -> Self {
+        CADataset { data }
+    }
+    pub fn new_from_image(
+        image: &RgbaImageBuffer,
+        init_method: InitMethod,
+        num_samples: usize,
+    ) -> Self {
+        let data = vec![CAData::new(CAState::new_from_image(image), &init_method); num_samples];
         CADataset { data }
     }
     pub fn split(self, ratio: f32) -> (Self, Self) {
