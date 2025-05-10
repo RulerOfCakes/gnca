@@ -1,17 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::thread;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::{self, JoinHandle};
 
+use burn::backend::wgpu::WgpuDevice;
+use burn::backend::{Autodiff, Wgpu};
 use burn::config::Config;
 use burn::optim::AdamConfig;
 use eframe::egui::{self};
 use eframe::{NativeOptions, egui::ViewportBuilder, run_native};
 use gnca::imageutils::{RgbaImageBuffer, load_emoji};
-use gnca::model::data::CADataset;
-use gnca::model::original_model::{ModelType, OriginalModelConfig};
-use gnca::model::train::TrainingConfig;
+use gnca::model::original_model::{ModelType, OriginalModel, OriginalModelConfig};
+use gnca::model::train::{TrainingConfig, TrainingFeedback};
 use gnca::ui::{add_draggable_option, create_image_from_rgba};
 
+const ARTIFACT_PATH: &str = "artifacts";
 const TRAINING_CFG_PATH: &str = "training_cfg.json";
 
 fn main() -> eframe::Result {
@@ -46,29 +49,44 @@ fn main() -> eframe::Result {
 enum AppState {
     #[default]
     Idle,
-    Training,
-    Inference,
+    Training {
+        image_recv: Receiver<TrainingFeedback<WgpuAutodiff>>,
+        interrupt_send: Sender<()>,
+        handle: Option<JoinHandle<OriginalModel<WgpuAutodiff>>>,
+    },
+    Inference {
+        image_recv: Receiver<TrainingFeedback<WgpuAutodiff>>, // TODO: fix
+        interrupt_send: Sender<()>,
+    },
 }
+
+type WgpuBackend = Wgpu<f32, i32>;
+type WgpuAutodiff = Autodiff<WgpuBackend>;
 
 struct MyApp {
     image_handles: HashMap<String, eframe::egui::TextureHandle>,
     state: AppState,
     training_cfg: TrainingConfig,
     target_image: Arc<RgbaImageBuffer>, // TODO: let this be modifiable from ui
+    device: WgpuDevice,
+    model: Option<OriginalModel<WgpuAutodiff>>, // burn models are Send but not Sync, therefore needs to be moved later on
 }
 
 impl MyApp {
     fn new() -> Self {
-        let training_cfg = TrainingConfig::load(TRAINING_CFG_PATH).unwrap_or(TrainingConfig::new(
-            OriginalModelConfig::new(ModelType::Growing),
-            AdamConfig::new(),
-        ));
+        let training_cfg = TrainingConfig::load(ARTIFACT_PATH.to_owned() + "/" + TRAINING_CFG_PATH)
+            .unwrap_or(TrainingConfig::new(
+                OriginalModelConfig::new(ModelType::Growing),
+                AdamConfig::new(),
+            ));
 
         Self {
             image_handles: HashMap::new(),
             state: AppState::Idle,
             training_cfg,
             target_image: Arc::new(load_emoji("😊", 40, 40).unwrap()),
+            device: WgpuDevice::default(),
+            model: None,
         }
     }
     fn insert_or_replace_image(
@@ -82,27 +100,97 @@ impl MyApp {
     }
 
     fn train_model(&mut self) {
-        self.state = AppState::Training;
+        if !matches!(self.state, AppState::Idle) {
+            return;
+        }
         let image = self.target_image.clone();
-        thread::spawn(move || {
-            let dataset =
-                CADataset::new_from_image(&image, gnca::model::data::InitMethod::CenterPixel, 144);
+        let device = self.device.clone();
+        let training_cfg = self.training_cfg.clone();
+
+        // Communication channels for feedback and interrupts
+        let (feedback_send, feedback_recv) = channel();
+        let (int_send, int_recv) = channel();
+
+        let handle = thread::spawn(move || {
+            training_cfg.train::<WgpuAutodiff>(
+                ARTIFACT_PATH,
+                &image,
+                device,
+                Some(feedback_send),
+                Some(int_recv),
+            )
         });
+
+        self.state = AppState::Training {
+            image_recv: feedback_recv,
+            interrupt_send: int_send,
+            handle: Some(handle),
+        };
+    }
+
+    fn update_state(&mut self) {
+        match &mut self.state {
+            AppState::Idle => return,
+            AppState::Training {
+                image_recv,
+                handle: handle_opt,
+                ..
+            } => {
+                match image_recv.try_recv() {
+                    Ok(feedback) => {
+                        let (regression, target) = feedback;
+                        todo!();
+                    }
+                    Err(_e) => {}
+                }
+                if let Some(handle) = handle_opt.take() {
+                    if handle.is_finished() {
+                        let model = handle.join().unwrap();
+                        self.model = Some(model);
+                        self.state = AppState::Idle;
+                    }
+                }
+            }
+            AppState::Inference { image_recv, .. } => {
+                todo!();
+                match image_recv.try_recv() {
+                    Ok(feedback) => {
+                        let (regression, target) = feedback;
+                    }
+                    Err(e) => {
+                        if e == std::sync::mpsc::TryRecvError::Disconnected {
+                            // detach the receiver
+                            self.state = AppState::Idle;
+                        }
+                    }
+                }
+            }
+        }
+        todo!("Upate images");
     }
 
     fn infer_model(&mut self) {
-        self.state = AppState::Inference;
-        thread::spawn(move || todo!());
+        todo!()
     }
 
     fn stop_model(&mut self) {
+        match &mut self.state {
+            AppState::Training { interrupt_send, .. } => {
+                let _ = interrupt_send.send(());
+            }
+            AppState::Inference { interrupt_send, .. } => {
+                let _ = interrupt_send.send(());
+            }
+            _ => {}
+        };
+        // Simply dropping the previous state is enough
         self.state = AppState::Idle;
-        todo!()
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
+        self.update_state();
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::panel::SidePanel::left("configuration_panel")
                 .default_width(300.0)
@@ -207,7 +295,7 @@ impl eframe::App for MyApp {
                         None,
                     );
                     // TODO: add Adam config(they are private)
-                    match self.state {
+                    match &self.state {
                         AppState::Idle => {
                             ui.horizontal(|ui| {
                                 if ui.button("Start Training").clicked() {
@@ -218,13 +306,13 @@ impl eframe::App for MyApp {
                                 }
                             });
                         }
-                        AppState::Training => {
+                        AppState::Training {..} => {
                             ui.label("Training in progress...");
                             if ui.button("Stop Training").clicked() {
                                 self.stop_model();
                             }
                         }
-                        AppState::Inference => {
+                        AppState::Inference {..} => {
                             ui.label("Inference in progress...");
                             if ui.button("Stop Inference").clicked() {
                                 self.stop_model();

@@ -1,4 +1,4 @@
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 
 use burn::{
     config::Config,
@@ -10,11 +10,11 @@ use burn::{
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use tracing::{Level, info, span, warn};
 
-use crate::{imageutils::RgbaImageBuffer, metrics::ImageGenerationOutput, model::data::CAState};
+use crate::{imageutils::RgbaImageBuffer, metrics::ImageGenerationOutput};
 
 use super::{
     data::{CABatcher, CADataset},
-    original_model::OriginalModelConfig,
+    original_model::{OriginalModel, OriginalModelConfig},
 };
 
 #[derive(Config)]
@@ -55,7 +55,8 @@ impl TrainingConfig {
         image: &RgbaImageBuffer,
         device: B::Device,
         feedback_sender: Option<Sender<TrainingFeedback<B>>>,
-    ) {
+        interrupt_receiver: Option<Receiver<()>>,
+    ) -> OriginalModel<B> {
         let span = span!(Level::TRACE, "train", artifact_dir);
         let _enter = span.enter();
 
@@ -66,7 +67,7 @@ impl TrainingConfig {
         );
 
         create_artifact_dir(artifact_dir);
-        self.save(format!("{}/self.json", artifact_dir))
+        self.save(format!("{}/config.json", artifact_dir))
             .expect("self should be saved successfully");
 
         B::seed(self.seed);
@@ -150,7 +151,15 @@ impl TrainingConfig {
                     }
                 }
             }
+
+            if let Some(recv) = interrupt_receiver.as_ref() {
+                if recv.try_recv().is_ok() {
+                    info!("Training interrupted by user.");
+                    break;
+                }
+            }
         }
-        todo!()
+        // todo!("Do something with the metrics");
+        model
     }
 }
